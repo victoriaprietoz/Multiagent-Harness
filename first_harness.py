@@ -1,11 +1,11 @@
-"""Ejemplo educativo de harness multiagente que usa Codex CLI con ChatGPT.
+"""Educational multi-agent harness using Codex CLI with ChatGPT.
 
-Requisitos: Python 3.10+, Codex CLI instalado, `codex login` o `codex` autenticado.
-Ejecuta: py harness_codex_4_agentes.py (PowerShell, Windows 10)
-No necesita paquetes pip ni una clave API de OpenAI.
+Requirements: Python 3.10+, Codex CLI installed and authenticated.
+Run: python first_harness.py (PowerShell, Windows).
+No pip packages or OpenAI API key are required.
 
-Cada llamada `codex exec` es independiente. El estado se comparte desde Python,
-no existe memoria automática entre esos procesos.
+Each `codex exec` call is independent. Python shares the state;
+there is no automatic memory between these processes.
 """
 import json
 import shutil
@@ -13,212 +13,235 @@ import subprocess
 import sys
 from pathlib import Path
 
-CARPETA = Path(__file__).resolve().parent / "demo_harness_codex"
-CARPETA.mkdir(exist_ok=True)
-MAX_PASOS = 8
-TIMEOUT_CODEX = 240
+WORK_DIR = Path(__file__).resolve().parent / "demo_harness_codex"
+WORK_DIR.mkdir(exist_ok=True)
+MAX_STEPS = 8
+CODEX_TIMEOUT = 240
 
-# Ejercicio deliberadamente pequeño y tests controlados por el harness.
-OBJETIVO = (
-    "Crear calculadora.py con sumar(a, b) y dividir(a, b). "
-    "La división entre cero debe lanzar ValueError. No uses dependencias externas."
+# A deliberately small exercise with tests controlled by the harness.
+OBJECTIVE = (
+    "Create calculator.py with add(a, b) and divide(a, b). "
+    "Division by zero must raise ValueError. Do not use external dependencies."
 )
 TESTS = '''import unittest
-from calculadora import sumar, dividir
+from calculator import add, divide
 
-class CalculadoraTests(unittest.TestCase):
-    def test_suma(self):
-        self.assertEqual(sumar(2, 3), 5)
-        self.assertEqual(sumar(-2, 1), -1)
+class CalculatorTests(unittest.TestCase):
+    def test_addition(self):
+        self.assertEqual(add(2, 3), 5)
+        self.assertEqual(add(-2, 1), -1)
 
     def test_division(self):
-        self.assertEqual(dividir(8, 2), 4)
+        self.assertEqual(divide(8, 2), 4)
 
-    def test_cero(self):
+    def test_zero(self):
         with self.assertRaises(ValueError):
-            dividir(1, 0)
+            divide(1, 0)
 
 if __name__ == "__main__":
     unittest.main()
 '''
-(CARPETA / "test_calculadora.py").write_text(TESTS, encoding="utf-8")
+(WORK_DIR / "test_calculator.py").write_text(TESTS, encoding="utf-8")
 
-ESQUEMA = {
+SCHEMA = {
     "type": "object",
     "properties": {
-        "agente": {
+        "agent": {
             "type": "string",
-            "enum": ["planificador", "programador", "tester", "corrector", "terminar"],
+            "enum": ["planner", "programmer", "tester", "fixer", "finish"],
         },
-        "motivo": {"type": "string"},
+        "reason": {"type": "string"},
     },
-    "required": ["agente", "motivo"],
+    "required": ["agent", "reason"],
     "additionalProperties": False,
 }
-(CARPETA / "decision.schema.json").write_text(
-    json.dumps(ESQUEMA, ensure_ascii=False, indent=2), encoding="utf-8"
+(WORK_DIR / "decision.schema.json").write_text(
+    json.dumps(SCHEMA, ensure_ascii=False, indent=2), encoding="utf-8"
 )
 
 
-def llamar_codex(prompt, permiso="read-only", json_estructurado=False):
-    """Llama a Codex como proceso, sin SDK ni clave de API independiente."""
-    ejecutable = shutil.which("codex")
-    if not ejecutable:
-        raise RuntimeError("No encuentro 'codex' en PATH. Instala Codex CLI y entra en tu cuenta.")
-    comando = [
-        ejecutable, "exec", "--skip-git-repo-check",
-        "--sandbox", permiso,
+def find_codex():
+    """Find Codex in PATH or in a local VS Code extension on Windows."""
+    executable = shutil.which("codex")
+    if executable:
+        return executable
+    if sys.platform == "win32":
+        candidates = []
+        for editor_dir in (".vscode", ".vscode-insiders"):
+            extensions = Path.home() / editor_dir / "extensions"
+            candidates.extend(extensions.glob("openai.chatgpt-*/bin/windows-*/codex.exe"))
+        for candidate in sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True):
+            try:
+                result = subprocess.run(
+                    [str(candidate), "--version"], capture_output=True, timeout=10, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if result.returncode == 0:
+                return str(candidate)
+    raise RuntimeError(
+        "Cannot find Codex in PATH or the VS Code extensions. "
+        "Install Codex CLI, then reopen your terminal."
+    )
+
+
+def call_codex(prompt, permission="read-only", structured_json=False):
+    """Call Codex as a process, without an SDK or a separate API key."""
+    executable = find_codex()
+    command = [
+        executable, "exec", "--skip-git-repo-check",
+        "--sandbox", permission,
     ]
-    if json_estructurado:
-        comando += ["--output-schema", str(CARPETA / "decision.schema.json")]
-    comando += ["-"]  # Lee el prompt desde stdin, sin problemas de comillas en Windows.
+    if structured_json:
+        command += ["--output-schema", str(WORK_DIR / "decision.schema.json")]
+    command += ["-"]  # Read the prompt from stdin to avoid Windows quoting issues.
 
     try:
-        resultado = subprocess.run(
-            comando, input=prompt, cwd=CARPETA,
+        result = subprocess.run(
+            command, input=prompt, cwd=WORK_DIR,
             text=True, encoding="utf-8", errors="replace",
-            capture_output=True, timeout=TIMEOUT_CODEX, check=False,
+            capture_output=True, timeout=CODEX_TIMEOUT, check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Codex agotó el límite de tiempo por llamada.") from exc
-    if resultado.returncode != 0:
+        raise RuntimeError("Codex exceeded the time limit for this call.") from exc
+    if result.returncode != 0:
         raise RuntimeError(
-            f"Codex terminó con error {resultado.returncode}:\n{resultado.stderr[-2500:]}"
+            f"Codex exited with error {result.returncode}:\n{result.stderr[-2500:]}"
         )
-    salida = resultado.stdout.strip()
-    if not salida:
-        raise RuntimeError("Codex no devolvió una respuesta final.")
-    return salida
+    output = result.stdout.strip()
+    if not output:
+        raise RuntimeError("Codex did not return a final response.")
+    return output
 
 
-def decidir(estado):
-    """El coordinador usa Codex para elegir dinámicamente el siguiente agente."""
-    instrucciones = f"""
-Eres el COORDINADOR de cuatro agentes. Nunca escribas archivos.
-Objetivo: {OBJETIVO}
-Estado actual: {json.dumps(estado, ensure_ascii=False)}
-Elige UNA acción:
-- planificador: si merece la pena diseñar primero el plan (una sola vez).
-- programador: si falta implementar calculadora.py.
-- tester: si hay código nuevo o corregido pendiente de probar.
-- corrector: si han fallado los tests.
-- terminar: solo si pruebas_ok=true.
-Prefiere la acción más útil; puedes saltarte planificador.
-Responde estrictamente según el esquema JSON proporcionado.
+def decide(state):
+    """The coordinator uses Codex to choose the next agent dynamically."""
+    instructions = f"""
+You are the COORDINATOR of four agents. Never write files.
+Objective: {OBJECTIVE}
+Current state: {json.dumps(state, ensure_ascii=False)}
+Choose ONE action:
+- planner: if it is worth making a plan first (only once).
+- programmer: if calculator.py still needs to be implemented.
+- tester: if new or fixed code needs testing.
+- fixer: if the tests have failed.
+- finish: only if tests_passed=true.
+Prefer the most useful action; you may skip the planner.
+Respond strictly according to the provided JSON schema.
 """
-    decision = json.loads(llamar_codex(instrucciones, json_estructurado=True))
-    return decision["agente"], decision["motivo"]
+    decision = json.loads(call_codex(instructions, structured_json=True))
+    return decision["agent"], decision["reason"]
 
 
-def ejecutar_tests():
-    """La validación la ejecuta Python: no dependemos de la opinión de un LLM."""
-    resultado = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover", "-p", "test_calculadora.py", "-v"],
-        cwd=CARPETA, capture_output=True, text=True, timeout=30, check=False,
+def run_tests():
+    """Python performs validation; we do not rely on an LLM's opinion."""
+    result = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-p", "test_calculator.py", "-v"],
+        cwd=WORK_DIR, capture_output=True, text=True, timeout=30, check=False,
     )
-    registro = (resultado.stdout + "\n" + resultado.stderr)[-3500:]
-    return resultado.returncode == 0, registro
+    log = (result.stdout + "\n" + result.stderr)[-3500:]
+    return result.returncode == 0, log
 
 
-def ejecutar_agente(nombre, estado):
-    """Cuatro roles. Los permisos son del proceso Codex, no de un modelo diferente."""
-    comun = f"Objetivo: {OBJETIVO}\nPlan: {estado['plan']}\n"
-    if nombre == "planificador":
-        estado["plan"] = llamar_codex(
-            comun + "Eres PLANIFICADOR. Escribe un plan conciso. No edites archivos.",
-            permiso="read-only",
+def run_agent(name, state):
+    """Four roles. Permissions apply to the Codex process, not a different model."""
+    context = f"Objective: {OBJECTIVE}\nPlan: {state['plan']}\n"
+    if name == "planner":
+        state["plan"] = call_codex(
+            context + "You are the PLANNER. Write a concise plan. Do not edit files.",
+            permission="read-only",
         )[:1500]
-        print("  Plan:", estado["plan"][:180])
+        print("  Plan:", state["plan"][:180])
 
-    elif nombre == "programador":
-        print("  Codex va a crear calculadora.py en la carpeta de demostración.")
-        llamar_codex(
-            comun + "Eres PROGRAMADOR. Implementa calculadora.py en esta carpeta. "
-            "No cambies test_calculadora.py ni decision.schema.json. "
-            "Trabaja únicamente en esta carpeta. No instales dependencias.",
-            permiso="workspace-write",
+    elif name == "programmer":
+        print("  Codex will create calculator.py in the demo folder.")
+        call_codex(
+            context + "You are the PROGRAMMER. Implement calculator.py in this folder. "
+            "Do not change test_calculator.py or decision.schema.json. "
+            "Work only in this folder. Do not install dependencies.",
+            permission="workspace-write",
         )
-        estado["pruebas_ejecutadas"] = False
-        estado["pruebas_ok"] = False
+        state["tests_run"] = False
+        state["tests_passed"] = False
 
-    elif nombre == "tester":
-        # El revisor puede inspeccionar, pero no modificar archivos.
-        revision = llamar_codex(
-            comun + "Eres TESTER. Lee calculadora.py y test_calculadora.py. "
-            "Señala posibles defectos brevemente. No modifiques archivos.",
-            permiso="read-only",
+    elif name == "tester":
+        # The reviewer may inspect files but cannot modify them.
+        review = call_codex(
+            context + "You are the TESTER. Read calculator.py and test_calculator.py. "
+            "Briefly identify potential defects. Do not modify files.",
+            permission="read-only",
         )
-        ok, errores = ejecutar_tests()
-        estado["pruebas_ejecutadas"] = True
-        estado["pruebas_ok"] = ok
-        estado["errores"] = "" if ok else errores
-        print("  Tests:", "SUPERADOS" if ok else "FALLIDOS")
-        print("  Revisión:", revision[:180].replace("\n", " "))
+        ok, errors = run_tests()
+        state["tests_run"] = True
+        state["tests_passed"] = ok
+        state["errors"] = "" if ok else errors
+        print("  Tests:", "PASSED" if ok else "FAILED")
+        print("  Review:", review[:180].replace("\n", " "))
         if not ok:
-            print("  Error:", errores[-450:])
+            print("  Error:", errors[-450:])
 
-    elif nombre == "corrector":
-        llamar_codex(
-            comun + "Eres CORRECTOR. Repara calculadora.py para superar estos tests:\n"
-            + estado["errores"] + "\nNo edites los tests ni otros archivos.",
-            permiso="workspace-write",
+    elif name == "fixer":
+        call_codex(
+            context + "You are the FIXER. Fix calculator.py to pass these tests:\n"
+            + state["errors"] + "\nDo not edit the tests or other files.",
+            permission="workspace-write",
         )
-        estado["pruebas_ejecutadas"] = False
-        estado["pruebas_ok"] = False
+        state["tests_run"] = False
+        state["tests_passed"] = False
 
-    # El harness restaura siempre las pruebas controladas si alguien las modificó.
-    archivo_tests = CARPETA / "test_calculadora.py"
-    if archivo_tests.read_text(encoding="utf-8") != TESTS:
-        archivo_tests.write_text(TESTS, encoding="utf-8")
-        print("  Aviso: se restauraron los tests originales.")
+    # Always restore the controlled tests if someone modified them.
+    test_file = WORK_DIR / "test_calculator.py"
+    if test_file.read_text(encoding="utf-8") != TESTS:
+        test_file.write_text(TESTS, encoding="utf-8")
+        print("  Warning: the original tests were restored.")
 
 
-def proteger_decision(agente, estado):
-    """La IA propone; las reglas duras las aplica Python."""
-    existe_codigo = (CARPETA / "calculadora.py").exists()
-    if estado["pruebas_ok"]:
-        return "terminar"  # Nunca repetir tras superar las pruebas.
-    if agente == "terminar":
-        return "tester" if existe_codigo else "programador"
-    if agente == "planificador" and estado["plan"]:
-        return "tester" if existe_codigo else "programador"
-    if agente in ("tester", "corrector") and not existe_codigo:
-        return "programador"
-    if agente == "corrector" and not (estado["pruebas_ejecutadas"] and not estado["pruebas_ok"]):
-        return "tester" if existe_codigo else "programador"
-    if agente == "programador" and existe_codigo:
+def guard_decision(agent, state):
+    """AI proposes actions; Python enforces the hard rules."""
+    code_exists = (WORK_DIR / "calculator.py").exists()
+    if state["tests_passed"]:
+        return "finish"  # Never repeat after the tests pass.
+    if agent == "finish":
+        return "tester" if code_exists else "programmer"
+    if agent == "planner" and state["plan"]:
+        return "tester" if code_exists else "programmer"
+    if agent in ("tester", "fixer") and not code_exists:
+        return "programmer"
+    if agent == "fixer" and not (state["tests_run"] and not state["tests_passed"]):
+        return "tester" if code_exists else "programmer"
+    if agent == "programmer" and code_exists:
         return "tester"
-    return agente
+    return agent
 
 
 def main():
-    estado = {
+    state = {
         "plan": "",
-        "pruebas_ejecutadas": False,
-        "pruebas_ok": False,
-        "errores": "",
-        "historial": [],
+        "tests_run": False,
+        "tests_passed": False,
+        "errors": "",
+        "history": [],
     }
-    print("Carpeta de trabajo:", CARPETA)
-    print("El harness puede ejecutar hasta", MAX_PASOS, "agentes.\n")
-    for paso in range(1, MAX_PASOS + 1):
-        propuesta, motivo = decidir(estado)
-        agente = proteger_decision(propuesta, estado)
-        print(f"Paso {paso}: coordinador propone {propuesta} ({motivo})")
-        if agente != propuesta:
-            print(f"  Regla del harness: ejecutar {agente} en su lugar.")
-        if agente == "terminar":
-            print("\nÉXITO: tests superados. Archivo:", CARPETA / "calculadora.py")
+    print("Working folder:", WORK_DIR)
+    print("The harness can run up to", MAX_STEPS, "agents.\n")
+    for step in range(1, MAX_STEPS + 1):
+        proposal, reason = decide(state)
+        agent = guard_decision(proposal, state)
+        print(f"Step {step}: coordinator proposes {proposal} ({reason})")
+        if agent != proposal:
+            print(f"  Harness rule: run {agent} instead.")
+        if agent == "finish":
+            print("\nSUCCESS: tests passed. File:", WORK_DIR / "calculator.py")
             return
-        ejecutar_agente(agente, estado)
-        estado["historial"].append(agente)
-        estado["historial"] = estado["historial"][-8:]
+        run_agent(agent, state)
+        state["history"].append(agent)
+        state["history"] = state["history"][-8:]
 
-    if estado["pruebas_ok"]:
-        print("\nÉXITO: las pruebas pasan. Archivo:", CARPETA / "calculadora.py")
+    if state["tests_passed"]:
+        print("\nSUCCESS: tests passed. File:", WORK_DIR / "calculator.py")
     else:
-        print("\nDETENIDO: límite de pasos alcanzado sin pruebas superadas.")
-        print("Revisa:", CARPETA)
+        print("\nSTOPPED: step limit reached without passing the tests.")
+        print("Check:", WORK_DIR)
 
 
 if __name__ == "__main__":
